@@ -11,10 +11,9 @@ import string
 # --- KONFIGURACIJA STRANICE ---
 st.set_page_config(page_title="LabFit Mobile", layout="wide", page_icon="📈")
 
-# --- 1. ROBUSNA INICIJALIZACIJA (DVOSTRUKA ZAŠTITA) ---
+# --- 1. ROBUSNA INICIJALIZACIJA ---
 def ensure_state():
     """Proverava da li su podaci ispravni. Ako nisu, resetuje ih."""
-    # Ako df ne postoji ILI nije DataFrame (npr. postao None), napravi nov
     if 'df' not in st.session_state or not isinstance(st.session_state.df, pd.DataFrame):
         st.session_state.df = pd.DataFrame(index=range(15), columns=['A', 'B', 'C', 'D'])
         st.session_state.df[:] = ""
@@ -25,21 +24,19 @@ def ensure_state():
     if 'plot_title' not in st.session_state:
         st.session_state.plot_title = "Grafik zavisnosti"
 
-# Pozivamo odmah na početku da sprečimo crash
 ensure_state()
 
-# --- 2. SIGURAN CALLBACK ---
+# --- 2. CALLBACK ---
 def sync_data():
-    """Sinhronizuje podatke samo ako su validni"""
+    """Sinhronizuje podatke"""
     if "editor_key" in st.session_state:
         new_data = st.session_state["editor_key"]
-        # KLJUČNO: Prihvati samo ako je DataFrame, inače ignoriši
         if new_data is not None and isinstance(new_data, pd.DataFrame):
             st.session_state.df = new_data
 
 # --- FUNKCIJE ---
 def add_new_column():
-    ensure_state() # Provera pre akcije
+    ensure_state()
     curr_cols = list(st.session_state.df.columns)
     new_char = string.ascii_uppercase[len(curr_cols) % 26]
     if len(curr_cols) >= 26: new_char += str(len(curr_cols)//26)
@@ -76,10 +73,10 @@ def load_project(uploaded_file):
     except Exception as e:
         st.error(f"Greška pri učitavanju: {e}")
 
-def run_formula(target_col, formula_str, limit_rows, source_df):
+def run_formula(target_col, formula_str, limit_rows):
     try:
-        # Koristimo source_df (ono sto se vidi na ekranu)
-        calc_df = source_df.iloc[:limit_rows].copy()
+        # Sada uvek radimo sa st.session_state.df jer smo ga prethodno ažurirali
+        calc_df = st.session_state.df.iloc[:limit_rows].copy()
         calc_df = calc_df.apply(pd.to_numeric, errors='coerce')
         
         formula_str = formula_str.replace('^', '**')
@@ -94,7 +91,6 @@ def run_formula(target_col, formula_str, limit_rows, source_df):
         if isinstance(res, (pd.Series, np.ndarray)):
             res = np.round(res, 5)
 
-        # Ažuriramo glavno stanje
         st.session_state.df[target_col] = st.session_state.df[target_col].astype(object)
         st.session_state.df.loc[:limit_rows-1, target_col] = res
         
@@ -106,8 +102,6 @@ def run_formula(target_col, formula_str, limit_rows, source_df):
 
 # --- GUI ---
 st.title("📱 LabFit Studio")
-
-# Još jedna provera za svaki slučaj
 ensure_state()
 
 tab1, tab2, tab3 = st.tabs(["📝 Podaci", "📈 Grafik", "💾 Fajlovi"])
@@ -126,9 +120,7 @@ with tab1:
             
     with st.expander("⚙️ Imena veličina i jedinice", expanded=False):
         meta_list = []
-        # Bezbedan pristup kolonama
         current_cols = st.session_state.df.columns if isinstance(st.session_state.df, pd.DataFrame) else []
-        
         for c in current_cols:
             meta = st.session_state.col_meta.get(c, {'qty': c, 'unit': '-'})
             meta_list.append({"Kolona": c, "Veličina": meta['qty'], "Jedinica": meta['unit']})
@@ -141,7 +133,7 @@ with tab1:
 
     st.markdown("### Tabela merenja")
     
-    # Editor koji vraća trenutno stanje (screen_df)
+    # Hvatamo podatke sa ekrana u 'screen_df'
     screen_df = st.data_editor(
         st.session_state.df,
         key="editor_key",         
@@ -153,15 +145,9 @@ with tab1:
 
     st.markdown("---")
     with st.expander("🧮 Kalkulator (Formula)"):
-        # Koristimo screen_df za listu kolona da bi bilo ažurno
         valid_cols = list(screen_df.columns) if isinstance(screen_df, pd.DataFrame) else []
-        
         c1, c2 = st.columns([1, 2])
-        if valid_cols:
-            target_col = c1.selectbox("Rezultat u:", valid_cols)
-        else:
-            target_col = None
-            
+        target_col = c1.selectbox("Rezultat u:", valid_cols) if valid_cols else None
         formula_inp = c2.text_input("Formula:", placeholder="npr. col(A)/20")
         
         c3, c4 = st.columns(2)
@@ -169,16 +155,26 @@ with tab1:
         
         if c4.button("Izračunaj"):
             if target_col and isinstance(screen_df, pd.DataFrame):
-                # Šaljemo screen_df u formulu
-                if run_formula(target_col, formula_inp, row_limit, screen_df):
+                # --- KLJUČNA IZMENA OVDE ---
+                # Pre nego što računamo, silom upisujemo ono što je na ekranu u glavnu memoriju.
+                # Ovo sprečava da ručno uneti podaci u koloni A nestanu.
+                st.session_state.df = screen_df.copy()
+                
+                # Sada pokrećemo formulu nad ažuriranim stanjem
+                if run_formula(target_col, formula_inp, row_limit):
                     st.rerun()
 
 # === TAB 2: GRAFIK ===
 with tab2:
     st.markdown("### Podešavanje ose")
-    # Koristimo screen_df za podatke
+    # I ovde prvo povlačimo podatke sa ekrana da bi grafik bio ažuran
     if isinstance(screen_df, pd.DataFrame) and not screen_df.empty:
-        col_opts = list(screen_df.columns)
+        df_plot = screen_df # Koristimo ono što se vidi
+    else:
+        df_plot = st.session_state.df # Fallback
+
+    if isinstance(df_plot, pd.DataFrame) and not df_plot.empty:
+        col_opts = list(df_plot.columns)
         c1, c2 = st.columns(2)
         idx_x = 0 if len(col_opts) > 0 else 0
         idx_y = 1 if len(col_opts) > 1 else 0
@@ -195,11 +191,11 @@ with tab2:
         if st.button("NACRTAJ I FITUJ", type="primary", use_container_width=True):
             try:
                 subset = pd.DataFrame()
-                subset['x'] = pd.to_numeric(screen_df[x_col], errors='coerce')
-                subset['y'] = pd.to_numeric(screen_df[y_col], errors='coerce')
-                if dx_col != "(Nema)": subset['dx'] = pd.to_numeric(screen_df[dx_col], errors='coerce')
+                subset['x'] = pd.to_numeric(df_plot[x_col], errors='coerce')
+                subset['y'] = pd.to_numeric(df_plot[y_col], errors='coerce')
+                if dx_col != "(Nema)": subset['dx'] = pd.to_numeric(df_plot[dx_col], errors='coerce')
                 else: subset['dx'] = 1e-9
-                if dy_col != "(Nema)": subset['dy'] = pd.to_numeric(screen_df[dy_col], errors='coerce')
+                if dy_col != "(Nema)": subset['dy'] = pd.to_numeric(df_plot[dy_col], errors='coerce')
                 else: subset['dy'] = 1.0
 
                 subset = subset.dropna()
