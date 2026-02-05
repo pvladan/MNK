@@ -11,9 +11,11 @@ import string
 # --- KONFIGURACIJA STRANICE ---
 st.set_page_config(page_title="LabFit Mobile", layout="wide", page_icon="📈")
 
-# --- 1. INICIJALIZACIJA STANJA ---
-def init_states():
-    if 'df' not in st.session_state or st.session_state.df is None:
+# --- 1. ROBUSNA INICIJALIZACIJA (DVOSTRUKA ZAŠTITA) ---
+def ensure_state():
+    """Proverava da li su podaci ispravni. Ako nisu, resetuje ih."""
+    # Ako df ne postoji ILI nije DataFrame (npr. postao None), napravi nov
+    if 'df' not in st.session_state or not isinstance(st.session_state.df, pd.DataFrame):
         st.session_state.df = pd.DataFrame(index=range(15), columns=['A', 'B', 'C', 'D'])
         st.session_state.df[:] = ""
     
@@ -23,16 +25,21 @@ def init_states():
     if 'plot_title' not in st.session_state:
         st.session_state.plot_title = "Grafik zavisnosti"
 
-init_states()
+# Pozivamo odmah na početku da sprečimo crash
+ensure_state()
 
-# --- 2. CALLBACK (Za čuvanje unosa bez brisanja) ---
+# --- 2. SIGURAN CALLBACK ---
 def sync_data():
-    """Čuva podatke čim se desi promena, da se ne izgube pri prelasku u drugu ćeliju"""
+    """Sinhronizuje podatke samo ako su validni"""
     if "editor_key" in st.session_state:
-        st.session_state.df = st.session_state["editor_key"]
+        new_data = st.session_state["editor_key"]
+        # KLJUČNO: Prihvati samo ako je DataFrame, inače ignoriši
+        if new_data is not None and isinstance(new_data, pd.DataFrame):
+            st.session_state.df = new_data
 
 # --- FUNKCIJE ---
 def add_new_column():
+    ensure_state() # Provera pre akcije
     curr_cols = list(st.session_state.df.columns)
     new_char = string.ascii_uppercase[len(curr_cols) % 26]
     if len(curr_cols) >= 26: new_char += str(len(curr_cols)//26)
@@ -40,6 +47,7 @@ def add_new_column():
     st.session_state.col_meta[new_char] = {'qty': 'Nova', 'unit': '-'}
 
 def remove_last_column():
+    ensure_state()
     cols = list(st.session_state.df.columns)
     if len(cols) > 1:
         last_col = cols[-1]
@@ -48,6 +56,7 @@ def remove_last_column():
             del st.session_state.col_meta[last_col]
 
 def save_project():
+    ensure_state()
     data = {
         "df": st.session_state.df.to_json(orient="split"),
         "meta": st.session_state.col_meta,
@@ -67,11 +76,9 @@ def load_project(uploaded_file):
     except Exception as e:
         st.error(f"Greška pri učitavanju: {e}")
 
-# --- NOVA LOGIKA ZA RAČUNANJE ---
-# Sada funkcija prima 'source_df' - to je ono što vidiš na ekranu!
 def run_formula(target_col, formula_str, limit_rows, source_df):
     try:
-        # Pravimo kopiju onoga što vidiš na ekranu
+        # Koristimo source_df (ono sto se vidi na ekranu)
         calc_df = source_df.iloc[:limit_rows].copy()
         calc_df = calc_df.apply(pd.to_numeric, errors='coerce')
         
@@ -87,7 +94,7 @@ def run_formula(target_col, formula_str, limit_rows, source_df):
         if isinstance(res, (pd.Series, np.ndarray)):
             res = np.round(res, 5)
 
-        # Upisujemo rezultat nazad u glavno stanje
+        # Ažuriramo glavno stanje
         st.session_state.df[target_col] = st.session_state.df[target_col].astype(object)
         st.session_state.df.loc[:limit_rows-1, target_col] = res
         
@@ -100,7 +107,8 @@ def run_formula(target_col, formula_str, limit_rows, source_df):
 # --- GUI ---
 st.title("📱 LabFit Studio")
 
-if st.session_state.df is None: init_states()
+# Još jedna provera za svaki slučaj
+ensure_state()
 
 tab1, tab2, tab3 = st.tabs(["📝 Podaci", "📈 Grafik", "💾 Fajlovi"])
 
@@ -118,20 +126,22 @@ with tab1:
             
     with st.expander("⚙️ Imena veličina i jedinice", expanded=False):
         meta_list = []
-        cols = st.session_state.df.columns if st.session_state.df is not None else []
-        for c in cols:
+        # Bezbedan pristup kolonama
+        current_cols = st.session_state.df.columns if isinstance(st.session_state.df, pd.DataFrame) else []
+        
+        for c in current_cols:
             meta = st.session_state.col_meta.get(c, {'qty': c, 'unit': '-'})
             meta_list.append({"Kolona": c, "Veličina": meta['qty'], "Jedinica": meta['unit']})
         
-        edited_meta = st.data_editor(pd.DataFrame(meta_list), key="meta_editor", hide_index=True, use_container_width=True)
-        for index, row in edited_meta.iterrows():
-            c = row['Kolona']
-            st.session_state.col_meta[c] = {'qty': row['Veličina'], 'unit': row['Jedinica']}
+        if meta_list:
+            edited_meta = st.data_editor(pd.DataFrame(meta_list), key="meta_editor", hide_index=True, use_container_width=True)
+            for index, row in edited_meta.iterrows():
+                c = row['Kolona']
+                st.session_state.col_meta[c] = {'qty': row['Veličina'], 'unit': row['Jedinica']}
 
     st.markdown("### Tabela merenja")
     
-    # --- OVO JE ONO ŠTO VIDIŠ NA EKRANU ---
-    # Hvatamo povratnu vrednost editora u promenljivu 'screen_df'
+    # Editor koji vraća trenutno stanje (screen_df)
     screen_df = st.data_editor(
         st.session_state.df,
         key="editor_key",         
@@ -143,24 +153,31 @@ with tab1:
 
     st.markdown("---")
     with st.expander("🧮 Kalkulator (Formula)"):
+        # Koristimo screen_df za listu kolona da bi bilo ažurno
+        valid_cols = list(screen_df.columns) if isinstance(screen_df, pd.DataFrame) else []
+        
         c1, c2 = st.columns([1, 2])
-        cols_now = list(screen_df.columns) # Koristimo screen_df za listu kolona
-        target_col = c1.selectbox("Rezultat u:", cols_now)
+        if valid_cols:
+            target_col = c1.selectbox("Rezultat u:", valid_cols)
+        else:
+            target_col = None
+            
         formula_inp = c2.text_input("Formula:", placeholder="npr. col(A)/20")
+        
         c3, c4 = st.columns(2)
         row_limit = c3.number_input("Prvih N redova:", value=15, min_value=1)
         
         if c4.button("Izračunaj"):
-            # KLJUČNA IZMENA: Šaljemo 'screen_df' u formulu!
-            # Tako računamo sa onim što vidiš, čak i ako server kasni.
-            if run_formula(target_col, formula_inp, row_limit, screen_df):
-                st.rerun()
+            if target_col and isinstance(screen_df, pd.DataFrame):
+                # Šaljemo screen_df u formulu
+                if run_formula(target_col, formula_inp, row_limit, screen_df):
+                    st.rerun()
 
 # === TAB 2: GRAFIK ===
 with tab2:
     st.markdown("### Podešavanje ose")
-    # I ovde koristimo screen_df da budemo sigurni
-    if screen_df is not None and not screen_df.empty:
+    # Koristimo screen_df za podatke
+    if isinstance(screen_df, pd.DataFrame) and not screen_df.empty:
         col_opts = list(screen_df.columns)
         c1, c2 = st.columns(2)
         idx_x = 0 if len(col_opts) > 0 else 0
@@ -177,7 +194,6 @@ with tab2:
 
         if st.button("NACRTAJ I FITUJ", type="primary", use_container_width=True):
             try:
-                # Opet koristimo screen_df za podatke
                 subset = pd.DataFrame()
                 subset['x'] = pd.to_numeric(screen_df[x_col], errors='coerce')
                 subset['y'] = pd.to_numeric(screen_df[y_col], errors='coerce')
@@ -226,7 +242,7 @@ with tab2:
 # === TAB 3: FAJLOVI ===
 with tab3:
     st.markdown("### Upravljanje projektom")
-    if st.session_state.df is not None:
+    if isinstance(st.session_state.df, pd.DataFrame):
         project_json = save_project()
         st.download_button("💾 Skini .lab fajl", project_json, "moj_eksperiment.lab", "application/json")
     st.markdown("---")
