@@ -11,25 +11,38 @@ import string
 # --- KONFIGURACIJA STRANICE ---
 st.set_page_config(page_title="LabFit Mobile", layout="wide", page_icon="📈")
 
-# --- SIGURNOSNA PROVERA (FIX ZA CRASH) ---
-# Ako je df postao None ili ne postoji, resetuj ga odmah
-if 'df' not in st.session_state or st.session_state.df is None:
-    st.session_state.df = pd.DataFrame(index=range(15), columns=['A', 'B', 'C', 'D'])
-    st.session_state.df[:] = ""
+# --- 1. SIGURNA INICIJALIZACIJA (Da nikad ne pukne) ---
+def init_states():
+    # Ako df ne postoji ili se pokvario (nije DataFrame), napravi nov
+    if 'df' not in st.session_state or not isinstance(st.session_state.df, pd.DataFrame):
+        st.session_state.df = pd.DataFrame(index=range(15), columns=['A', 'B', 'C', 'D'])
+        st.session_state.df[:] = ""
+    
+    if 'col_meta' not in st.session_state:
+        st.session_state.col_meta = {col: {'qty': f'{col}', 'unit': '-'} for col in ['A', 'B', 'C', 'D']}
 
-if 'col_meta' not in st.session_state:
-    st.session_state.col_meta = {col: {'qty': f'{col}', 'unit': '-'} for col in ['A', 'B', 'C', 'D']}
+    if 'plot_title' not in st.session_state:
+        st.session_state.plot_title = "Grafik zavisnosti"
 
-if 'plot_title' not in st.session_state:
-    st.session_state.plot_title = "Grafik zavisnosti"
+init_states() # Pozivamo odmah na početku
 
-# --- FUNKCIJE ---
+# --- 2. CALLBACK FUNKCIJA (OVO REŠAVA PROBLEM UNOSA) ---
+def sync_data():
+    """
+    Ova funkcija se aktivira istog trenutka kad napustiš ćeliju.
+    Ona direktno kopira podatke iz editora u glavnu memoriju.
+    """
+    edited_data = st.session_state.get("editor_key")
+    
+    # Provera da li su podaci validni pre upisa (da izbegnemo crash)
+    if edited_data is not None and isinstance(edited_data, pd.DataFrame):
+        st.session_state.df = edited_data
 
+# --- OSTALE FUNKCIJE ---
 def add_new_column():
     curr_cols = list(st.session_state.df.columns)
     new_char = string.ascii_uppercase[len(curr_cols) % 26]
-    if len(curr_cols) >= 26: 
-        new_char += str(len(curr_cols)//26)
+    if len(curr_cols) >= 26: new_char += str(len(curr_cols)//26)
     st.session_state.df[new_char] = ""
     st.session_state.col_meta[new_char] = {'qty': 'Nova', 'unit': '-'}
 
@@ -42,10 +55,7 @@ def remove_last_column():
             del st.session_state.col_meta[last_col]
 
 def save_project():
-    # Osiguraj da je df validan pre čuvanja
-    if st.session_state.df is None:
-        st.error("Nema podataka za čuvanje.")
-        return ""
+    if st.session_state.df is None: return ""
     data = {
         "df": st.session_state.df.to_json(orient="split"),
         "meta": st.session_state.col_meta,
@@ -92,12 +102,9 @@ def run_formula(target_col, formula_str, limit_rows):
 
 # --- GUI ---
 st.title("📱 LabFit Studio")
-st.markdown("Fizika: Obrada podataka i grafici")
 
-# Oporavak od greške (ako je df i dalje None)
-if st.session_state.df is None:
-     st.session_state.df = pd.DataFrame(index=range(15), columns=['A', 'B', 'C', 'D'])
-     st.session_state.df[:] = ""
+# Dodatna zaštita: Ako je df ipak None (teoretski nemoguće zbog init_states), popravi ga
+if st.session_state.df is None: init_states()
 
 tab1, tab2, tab3 = st.tabs(["📝 Podaci", "📈 Grafik", "💾 Fajlovi"])
 
@@ -115,7 +122,7 @@ with tab1:
             
     with st.expander("⚙️ Imena veličina i jedinice", expanded=False):
         meta_list = []
-        # Bezbedno iteriranje
+        # Bezbedno čitanje kolona
         cols = st.session_state.df.columns if st.session_state.df is not None else []
         for c in cols:
             meta = st.session_state.col_meta.get(c, {'qty': c, 'unit': '-'})
@@ -128,19 +135,16 @@ with tab1:
 
     st.markdown("### Tabela merenja")
     
-    # --- STABILNA VERZIJA EDITORA ---
-    # Vratili smo se na standardni način koji ne puca
-    edited_df = st.data_editor(
+    # --- OVO JE KLJUČNA KOMPONENTA ---
+    # Koristimo 'key' da vežemo stanje, i 'on_change' da ga odmah ažuriramo
+    st.data_editor(
         st.session_state.df,
-        key="main_data_editor_safe", 
+        key="editor_key",         # Jedinstveni ključ
+        on_change=sync_data,      # Poziva funkciju sync_data čim se desi promena
         num_rows="dynamic",
         use_container_width=True,
         height=400
     )
-    
-    # Ažuriranje samo ako ima validnih promena
-    if edited_df is not None and not edited_df.equals(st.session_state.df):
-        st.session_state.df = edited_df
 
     st.markdown("---")
     with st.expander("🧮 Kalkulator (Formula)"):
